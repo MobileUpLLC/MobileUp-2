@@ -1,6 +1,6 @@
 import Foundation
 
-typealias OptimisticUpdate<T> = (T) -> T
+public typealias OptimisticUpdate<T> = (T) -> T
 
 /// Управляет выполнением оптимистичных (до подтверждения сервером) обновлений. 
 actor OptimisticUpdateManager {
