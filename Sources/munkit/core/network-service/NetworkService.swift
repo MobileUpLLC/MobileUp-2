@@ -43,14 +43,82 @@ public actor MUNNetworkService<Target: MUNAPITarget> {
             plugins: moyaProvider.plugins + [accessTokenPlugin]
         )
     }
+    
+    public func cancelRequests() {
+        tokenRefreshTask?.cancel()
+        tokenRefreshTask = nil
+        
+        activeRequests.forEach { request in
+            request.task.cancel()
+        }
+
+        activeRequests.removeAll()
+        requestsPendingTokenRefresh.removeAll()
+
+        _Concurrency.Task { @MUNLogger in
+            MUNLogger.sharedLoggable?.log(type: .info, "All network requests have been cancelled")
+        }
+    }
 
     public func executeRequest<T: Decodable & Sendable>(
         target: Target,
         isTokenRefreshed: Bool = false
     ) async throws -> T {
-        let requestId = startRequest(isAccessTokenRequired: target.isAccessTokenRequired)
-        defer { completeRequest(requestId) }
+        let requestId = UUID()
+        let requestTask = _Concurrency.Task<T, any Error> {
+            try await performExecuteRequestWithDecodable(
+                requestId: requestId,
+                target: target,
+                isTokenRefreshed: isTokenRefreshed
+            )
+        }
+        
+        saveActiveRequest(
+            requestId: requestId,
+            isAccessTokenRequired: target.isAccessTokenRequired,
+            task: requestTask
+        )
+        
+        do {
+            let result = try await requestTask.value
+            completeRequest(requestId)
+            return result
+        } catch {
+            completeRequest(requestId)
+            throw error
+        }
+    }
 
+    public func executeRequest(target: Target, isTokenRefreshed: Bool = false) async throws {
+        let requestId = UUID()
+        let requestTask = _Concurrency.Task<Void, any Error> {
+            try await performExecuteRequestWithoutDecodable(
+                requestId: requestId,
+                target: target,
+                isTokenRefreshed: isTokenRefreshed
+            )
+        }
+        
+        saveActiveRequest(
+            requestId: requestId,
+            isAccessTokenRequired: target.isAccessTokenRequired,
+            task: requestTask
+        )
+        
+        do {
+            try await requestTask.value
+            completeRequest(requestId)
+        } catch {
+            completeRequest(requestId)
+            throw error
+        }
+    }
+
+    private func performExecuteRequestWithDecodable<T: Decodable & Sendable>(
+        requestId: UUID,
+        target: Target,
+        isTokenRefreshed: Bool
+    ) async throws -> T {
         do {
             let response = try await performRequest(target: target).get()
             let filteredResponse = try response.filterSuccessfulStatusCodes()
@@ -62,14 +130,19 @@ public actor MUNNetworkService<Target: MUNAPITarget> {
                 target: target,
                 isTokenRefreshed: isTokenRefreshed
             )
-            return try await executeRequest(target: target, isTokenRefreshed: true)
+            return try await performExecuteRequestWithDecodable(
+                requestId: requestId,
+                target: target,
+                isTokenRefreshed: true
+            )
         }
     }
 
-    public func executeRequest(target: Target, isTokenRefreshed: Bool = false) async throws {
-        let requestId = startRequest(isAccessTokenRequired: target.isAccessTokenRequired)
-        defer { completeRequest(requestId) }
-
+    private func performExecuteRequestWithoutDecodable(
+        requestId: UUID,
+        target: Target,
+        isTokenRefreshed: Bool
+    ) async throws {
         do {
             let response = try await performRequest(target: target).get()
             let _ = try response.filterSuccessfulStatusCodes()
@@ -80,16 +153,26 @@ public actor MUNNetworkService<Target: MUNAPITarget> {
                 target: target,
                 isTokenRefreshed: isTokenRefreshed
             )
-            try await executeRequest(target: target, isTokenRefreshed: true)
+            try await performExecuteRequestWithoutDecodable(
+                requestId: requestId,
+                target: target,
+                isTokenRefreshed: true
+            )
         }
     }
 
-    private func startRequest(isAccessTokenRequired: Bool) -> UUID {
-        let requestId = UUID()
+    private func saveActiveRequest<T>(
+        requestId: UUID,
+        isAccessTokenRequired: Bool,
+        task: _Concurrency.Task<T, Error>
+    ) {
         activeRequests.insert(
-            NetworkServiceActiveRequest(id: requestId, isAccessTokenRequired: isAccessTokenRequired)
+            NetworkServiceActiveRequest(
+                id: requestId, 
+                isAccessTokenRequired: isAccessTokenRequired,
+                task: .init(task)
+            )
         )
-        return requestId
     }
 
     private func performRequest(target: Target) async throws -> Result<Response, MoyaError> {

@@ -9,7 +9,7 @@ import Moya
 import Foundation
 
 public protocol MUNAPITarget: TargetType, AccessTokenAuthorizable, Sendable {
-    var parameters: [String: Any] { get }
+    var parameters: [String: Sendable] { get }
     var isAccessTokenRequired: Bool { get }
     var isRefreshTokenRequest: Bool { get }
     var isMockEnabled: Bool { get }
